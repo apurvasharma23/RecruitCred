@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #0E111F;
+    color: #F8FAFC;
+    letter-spacing: -0.01em;
+  }
+  
+  code, pre {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    letter-spacing: -0.025em;
+  }
+}
+
+/* Accessible clean custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0E111F;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #252A46;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #32395C;
+}
+
+/* Professional Card Surfaces (Clean & Trustworthy, Distinctive Midnight & Violet) */
+.saas-card {
+  background: #171A2B;
+  border: 1px solid #252A46;
+  border-radius: 1rem;
+}
+
+.saas-card-subtle {
+  background: #111424;
+  border: 1px solid #252A46;
+  border-radius: 0.75rem;
+}
+
+.saas-card-interactive {
+  background: #171A2B;
+  border: 1px solid #252A46;
+  border-radius: 1rem;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.saas-card-interactive:hover {
+  border-color: #6C63FF;
+  box-shadow: 0 10px 20px -5px rgba(108, 99, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+/* Clean Modal Surface */
+.glass-dropdown {
+  background: #171A2B;
+  border: 1px solid #252A46;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+}
+
+/* Subtle Gradient Headlines (Restrained) */
+.text-gradient-brand {
+  background: linear-gradient(135deg, #FFFFFF 0%, #E3E4EA 50%, #8B7CFF 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-gradient-indigo {
+  background: linear-gradient(135deg, #8B7CFF 0%, #6C63FF 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Trust Badges - Consistent Status Tokens */
+.badge-verified {
+  background-color: rgba(16, 185, 129, 0.12);
+  color: #10B981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-assessed {
+  background-color: rgba(139, 124, 255, 0.12);
+  color: #8B7CFF;
+  border: 1px solid rgba(139, 124, 255, 0.3);
+}
+
+.badge-evidence {
+  background-color: rgba(108, 99, 255, 0.12);
+  color: #6C63FF;
+  border: 1px solid rgba(108, 99, 255, 0.3);
+}
+
+.badge-claimed {
+  background-color: #252A46;
+  color: #666A7A;
+  border: 1px solid #32395C;
+}
+
+/* Accessibility: Support prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
