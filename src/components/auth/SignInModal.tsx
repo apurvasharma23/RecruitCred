@@ -8,7 +8,8 @@ import {
   ArrowRight,
   Zap,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
 
 interface SignInModalProps {
@@ -26,12 +27,13 @@ export const SignInModal: React.FC<SignInModalProps> = ({
   
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showForgotToast, setShowForgotToast] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSignIn = (e: React.FormEvent) => {
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -44,16 +46,23 @@ export const SignInModal: React.FC<SignInModalProps> = ({
       return;
     }
 
-    const success = login(identifier.trim(), password.trim());
-    if (success) {
+    setIsLoading(true);
+    const result = await login(identifier.trim(), password.trim());
+    setIsLoading(false);
+
+    if (result.success) {
+      setIdentifier('');
+      setPassword('');
       onClose();
     } else {
-      setError('Incorrect RecruitCred ID or password. Please try again.');
+      setError(result.error || 'Incorrect RecruitCred ID or password. Please try again.');
     }
   };
 
   const handleDemoLogin = (userId: string) => {
     loginAsDemoUser(userId);
+    setIdentifier('');
+    setPassword('');
     onClose();
   };
 
@@ -66,7 +75,12 @@ export const SignInModal: React.FC<SignInModalProps> = ({
 
         {/* Close Button */}
         <button
-          onClick={onClose}
+          onClick={() => {
+            setError(null);
+            setIdentifier('');
+            setPassword('');
+            onClose();
+          }}
           className="absolute top-5 right-5 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           aria-label="Close sign in dialog"
         >
@@ -108,7 +122,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
         <form onSubmit={handleSignIn} className="space-y-4">
           <div>
             <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-              RecruitCred ID or Email
+              RecruitCred ID or Registered Email
             </label>
             <div className="relative">
               <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -119,7 +133,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
                   setIdentifier(e.target.value);
                   setError(null);
                 }}
-                placeholder="e.g. rahulsharma or student@college.edu"
+                placeholder="e.g. rahulsharma or rahul@thapar.edu"
                 className="w-full bg-slate-950 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40 transition-all"
                 autoFocus
               />
@@ -134,7 +148,7 @@ export const SignInModal: React.FC<SignInModalProps> = ({
               <button
                 type="button"
                 onClick={() => setShowForgotToast(true)}
-                className="text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors"
+                className="text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors cursor-pointer"
               >
                 Forgot Password?
               </button>
@@ -156,10 +170,11 @@ export const SignInModal: React.FC<SignInModalProps> = ({
 
           <button
             type="submit"
-            className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
+            disabled={isLoading}
+            className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2 cursor-pointer mt-2"
           >
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
             <span>Sign In to Dashboard</span>
-            <ArrowRight className="w-4 h-4" />
           </button>
         </form>
 
@@ -172,14 +187,14 @@ export const SignInModal: React.FC<SignInModalProps> = ({
                 onClose();
                 onSwitchToGetStarted();
               }}
-              className="text-indigo-400 hover:text-indigo-300 font-bold transition-colors underline decoration-indigo-500/40 ml-1"
+              className="text-indigo-400 hover:text-indigo-300 font-bold transition-colors underline decoration-indigo-500/40 ml-1 cursor-pointer"
             >
               Create Account
             </button>
           </p>
         </div>
 
-        {/* Hackathon Evaluation Fast-Track */}
+        {/* Evaluation Fast-Track */}
         <div className="mt-5 p-3 rounded-2xl bg-slate-950/70 border border-slate-800/80">
           <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
             <Zap className="w-3 h-3 text-amber-400" />
@@ -189,14 +204,14 @@ export const SignInModal: React.FC<SignInModalProps> = ({
             <button
               type="button"
               onClick={() => handleDemoLogin('user-rahul')}
-              className="px-2.5 py-1.5 rounded-xl bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-500/30 text-[11px] text-indigo-300 font-medium text-left truncate transition-colors"
+              className="px-2.5 py-1.5 rounded-xl bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-500/30 text-[11px] text-indigo-300 font-medium text-left truncate transition-colors cursor-pointer"
             >
               Sign In: <strong>Student Account</strong>
             </button>
             <button
               type="button"
               onClick={() => handleDemoLogin('user-rohan')}
-              className="px-2.5 py-1.5 rounded-xl bg-amber-950/40 hover:bg-amber-900/50 border border-amber-500/30 text-[11px] text-amber-300 font-medium text-left truncate transition-colors"
+              className="px-2.5 py-1.5 rounded-xl bg-amber-950/40 hover:bg-amber-900/50 border border-amber-500/30 text-[11px] text-amber-300 font-medium text-left truncate transition-colors cursor-pointer"
             >
               Sign In: <strong>Recruiter Lead</strong>
             </button>

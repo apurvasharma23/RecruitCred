@@ -147,6 +147,41 @@ export const AssessmentResultView: React.FC = () => {
             )}
           </p>
 
+          {attempt.autoSubmitted && (
+            <div className="mt-5 w-full max-w-xl rounded-2xl border border-rose-500/50 bg-rose-950/40 p-5 text-left text-xs text-rose-200 animate-in slide-in-from-top duration-200">
+              <div className="flex items-center gap-2 font-bold text-rose-300 text-sm">
+                <AlertCircle className="h-5 w-5 text-rose-400 shrink-0" />
+                <span>
+                  {attempt.terminationReason?.includes('3 people')
+                    ? 'Assessment automatically submitted: cheating detected.'
+                    : attempt.terminationReason?.includes('3 warnings')
+                    ? 'Assessment automatically submitted after 3 warnings.'
+                    : 'Assessment automatically submitted.'}
+                </span>
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-rose-300/90 font-medium">
+                {attempt.terminationReason || 'The assessment session was automatically terminated due to proctoring policy enforcement.'}
+              </p>
+              {attempt.integrityPenalty ? (
+                <div className="mt-2 pt-2 border-t border-rose-500/30 text-[11px] text-rose-400 font-mono">
+                  Integrity Penalty: -{attempt.integrityPenalty}% deducted from score.
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {!attempt.autoSubmitted && attempt.integrityPenalty ? (
+            <div className="mt-5 w-full max-w-xl rounded-2xl border border-amber-500/30 bg-amber-950/30 p-4 text-left text-xs text-amber-200">
+              <div className="flex items-center gap-2 font-bold text-amber-300">
+                <AlertCircle className="h-4 w-4" />
+                Integrity adjustment applied
+              </div>
+              <p className="mt-1 leading-relaxed">
+                {attempt.integrityPenalty}% was deducted from the raw score due to detected proctoring signals.
+              </p>
+            </div>
+          ) : null}
+
           {/* Dynamic Certificate Action Card (When Passed) */}
           {attempt.passed && (
             <div className="mt-6 p-5 rounded-2xl bg-slate-950/90 border border-emerald-500/40 shadow-glow-verified flex flex-col sm:flex-row items-center justify-between gap-4 w-full max-w-xl">

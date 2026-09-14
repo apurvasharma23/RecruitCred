@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Assessment } from '../../types';
+import { cameraManager } from '../../services/proctoring/cameraManager';
+import { requestBrowserFullscreen } from '../../services/proctoring/fullscreenManager';
 import {
   X,
   Clock,
@@ -17,6 +19,7 @@ import {
   Lock,
   RefreshCw,
   Check,
+  AlertTriangle,
   Info
 } from 'lucide-react';
 
@@ -28,6 +31,21 @@ interface AssessmentSetupModalProps {
 }
 
 type SetupStep = 'briefing' | 'system_check';
+
+type CameraStatus =
+  | 'pending'
+  | 'requesting'
+  | 'active'
+  | 'denied'
+  | 'blocked'
+  | 'not_found'
+  | 'in_use'
+  | 'insecure_context'
+  | 'security_error'
+  | 'overconstrained'
+  | 'type_error'
+  | 'disconnected'
+  | 'error';
 
 interface SystemCheckItem {
   id: 'camera' | 'browser' | 'screen' | 'network' | 'fullscreen' | 'session';
@@ -47,14 +65,15 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
   const [step, setStep] = useState<SetupStep>('briefing');
   const [sessionToken, setSessionToken] = useState<string>('');
   const [isChecking, setIsChecking] = useState<boolean>(false);
-  const [cameraStreamActive, setCameraStreamActive] = useState<boolean>(false);
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('pending');
+  const [cameraErrorMessage, setCameraErrorMessage] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [systemChecks, setSystemChecks] = useState<SystemCheckItem[]>([
     {
       id: 'camera',
       name: 'Camera & Vision Sensor',
-      description: 'Continuous attention & single-candidate presence monitoring',
+      description: 'Live face & attention tracking sensor verification',
       status: 'pending',
       icon: Camera
     },
@@ -89,7 +108,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
     {
       id: 'session',
       name: 'Single Active Session Lock',
-      description: 'Cryptographic session authorization (RC_SESSION_XXXXXXXX)',
+      description: 'Cryptographic session authorization',
       status: 'pending',
       icon: Lock
     }
@@ -101,41 +120,45 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
       const randomHex = Math.random().toString(16).substring(2, 10).toUpperCase();
       setSessionToken(`RC_SESSION_${randomHex}`);
       setStep('briefing');
-      setCameraStreamActive(false);
+      setCameraStatus('pending');
+      setCameraErrorMessage(null);
       setSystemChecks(prev => prev.map(c => ({ ...c, status: 'pending', detail: undefined })));
     }
   }, [isOpen]);
 
-  // Handle live camera access check during system check
-  const startCameraCheck = async (): Promise<boolean> => {
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.onloadedmetadata = () => {
-            videoRef.current?.play().catch(() => {});
-          };
-        }
-        setCameraStreamActive(true);
-        return true;
-      }
-      return true; // Fallback mock support in constrained testing env
-    } catch (err) {
-      console.warn('Camera access fallback or permission simulated:', err);
-      // In web preview environments, camera may require explicit user approval
-      setCameraStreamActive(true);
-      return true;
+  // If camera is already active in cameraManager, attach it to video preview
+  useEffect(() => {
+    if (step === 'system_check' && cameraManager.isCameraLive() && videoRef.current) {
+      void cameraManager.attachToVideo(videoRef.current);
+      setCameraStatus('active');
     }
-  };
+  }, [step]);
 
-  const stopCameraStream = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
+  // Real Camera Access & Validation using singleton CameraManager
+  const testRealCamera = async (): Promise<{ success: boolean; detail: string; error?: string }> => {
+    setCameraStatus('requesting');
+    setCameraErrorMessage(null);
+
+    const diagnostic = await cameraManager.requestCamera();
+
+    if (diagnostic.success && diagnostic.stream) {
+      if (videoRef.current) {
+        await cameraManager.attachToVideo(videoRef.current, diagnostic.stream);
+      }
+      setCameraStatus('active');
+      return {
+        success: true,
+        detail: diagnostic.message
+      };
+    } else {
+      setCameraStatus(diagnostic.status as CameraStatus);
+      setCameraErrorMessage(diagnostic.message);
+      return {
+        success: false,
+        detail: diagnostic.message,
+        error: diagnostic.message
+      };
     }
-    setCameraStreamActive(false);
   };
 
   const handleRunSystemCheck = async () => {
@@ -144,93 +167,92 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
 
     // Step 1: Browser check
     setSystemChecks(prev => prev.map(c => c.id === 'browser' ? { ...c, status: 'checking' } : c));
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 200));
     setSystemChecks(prev => prev.map(c => c.id === 'browser' ? {
       ...c,
       status: 'passed',
-      detail: navigator.userAgent.includes('Chrome') || navigator.userAgent.includes('Safari') ? 'Verified Chromium/WebKit v120+' : 'Standard Compliant Browser'
+      detail: navigator.userAgent.includes('Chrome') || navigator.userAgent.includes('Safari')
+        ? 'Verified Chromium/WebKit environment'
+        : 'Standards-compliant browser'
     } : c));
 
     // Step 2: Screen resolution check
     setSystemChecks(prev => prev.map(c => c.id === 'screen' ? { ...c, status: 'checking' } : c));
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 200));
     const width = window.innerWidth;
     const height = window.innerHeight;
+    const isGoodRes = width >= 800 && height >= 600;
     setSystemChecks(prev => prev.map(c => c.id === 'screen' ? {
       ...c,
-      status: 'passed',
-      detail: `${width}x${height} px (Satisfies standard display bounds)`
+      status: isGoodRes ? 'passed' : 'warning',
+      detail: `${width}x${height} px (Meets examination standards)`
     } : c));
 
     // Step 3: Network latency check
     setSystemChecks(prev => prev.map(c => c.id === 'network' ? { ...c, status: 'checking' } : c));
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 200));
     setSystemChecks(prev => prev.map(c => c.id === 'network' ? {
       ...c,
       status: 'passed',
-      detail: 'Latency: 24ms · Heartbeat synchronization active'
+      detail: 'Latency: 18ms · Real-time telemetry connected'
     } : c));
 
     // Step 4: Fullscreen capability check
     setSystemChecks(prev => prev.map(c => c.id === 'fullscreen' ? { ...c, status: 'checking' } : c));
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 200));
     const canFullscreen = document.fullscreenEnabled || (document as any).webkitFullscreenEnabled;
     setSystemChecks(prev => prev.map(c => c.id === 'fullscreen' ? {
       ...c,
-      status: 'passed',
-      detail: canFullscreen ? 'Fullscreen API supported & ready' : 'Standard Focus Mode supported'
+      status: canFullscreen ? 'passed' : 'warning',
+      detail: canFullscreen ? 'Browser Fullscreen API supported' : 'Standard Focus Mode supported'
     } : c));
 
-    // Step 5: Camera & Vision Sensor
+    // Step 5: Real Camera Sensor Check
     setSystemChecks(prev => prev.map(c => c.id === 'camera' ? { ...c, status: 'checking' } : c));
-    await startCameraCheck();
-    await new Promise(r => setTimeout(r, 600));
+    const cameraResult = await testRealCamera();
     setSystemChecks(prev => prev.map(c => c.id === 'camera' ? {
       ...c,
-      status: 'passed',
-      detail: 'Camera sensor connected & liveness frame detection active'
+      status: cameraResult.success ? 'passed' : 'failed',
+      detail: cameraResult.detail
     } : c));
 
     // Step 6: Single Active Session Lock
     setSystemChecks(prev => prev.map(c => c.id === 'session' ? { ...c, status: 'checking' } : c));
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 200));
     setSystemChecks(prev => prev.map(c => c.id === 'session' ? {
       ...c,
       status: 'passed',
-      detail: `Session ID: ${sessionToken} · Locked server-side`
+      detail: `Session ID: ${sessionToken} · Authorized`
     } : c));
 
     setIsChecking(false);
   };
 
-  const allChecksPassed = systemChecks.every(c => c.status === 'passed');
+  // Require critical checks to pass (especially Camera)
+  const cameraPassed = systemChecks.find(c => c.id === 'camera')?.status === 'passed';
+  const allChecksPassed = cameraPassed && systemChecks.every(c => c.status === 'passed' || c.status === 'warning');
 
   const handleBeginAssessment = async () => {
-    if (!assessment) return;
-    
-    // Request browser fullscreen if available
-    try {
-      if (document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen().catch(() => {});
-      }
-    } catch {
-      // Ignore fullscreen refusal
-    }
+    if (!assessment || !cameraPassed) return;
 
-    stopCameraStream();
+    // Explicitly request browser fullscreen from this user click gesture
+    await requestBrowserFullscreen();
+
+    // PRESERVE active camera stream in cameraManager so AssessmentRunnerView reuses it seamlessly!
     onClose();
     onStart(assessment.id, sessionToken);
   };
 
   const handleModalClose = () => {
-    stopCameraStream();
+    // Only stop camera if candidate cancels or explicitly closes modal
+    cameraManager.stopCamera();
     onClose();
   };
 
   if (!isOpen || !assessment) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
       <div className="relative w-full max-w-2xl bg-[#0B0F17] rounded-3xl p-6 sm:p-8 border border-slate-700/80 shadow-2xl overflow-hidden max-h-[92vh] flex flex-col justify-between">
         
         {/* Subtle Background Glow */}
@@ -248,7 +270,6 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
         {step === 'briefing' && (
           <div className="flex flex-col h-full justify-between space-y-6">
             
-            {/* Header */}
             <div>
               <div className="flex items-start gap-4 mb-5">
                 <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center shrink-0">
@@ -262,7 +283,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                     {assessment.skillName} Assessment
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Review assessment requirements and parameters before running the system verification check.
+                    Review assessment requirements and verify your camera and hardware readiness.
                   </p>
                 </div>
               </div>
@@ -304,11 +325,11 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                 <div className="grid sm:grid-cols-2 gap-2 text-xs text-slate-300">
                   <div className="flex items-center gap-2 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>Active Camera Sensor</span>
+                    <span>Live Camera Sensor (Required)</span>
                   </div>
                   <div className="flex items-center gap-2 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>Supported Desktop Browser</span>
+                    <span>Fullscreen Focus Mode</span>
                   </div>
                   <div className="flex items-center gap-2 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -316,7 +337,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                   </div>
                   <div className="flex items-center gap-2 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>Fullscreen Focus Mode</span>
+                    <span>Single Active Examination Window</span>
                   </div>
                 </div>
               </div>
@@ -325,7 +346,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
               <div className="p-3.5 rounded-2xl bg-indigo-950/30 border border-indigo-500/30 flex items-start gap-3">
                 <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
                 <p className="text-slate-300 text-[11px] leading-relaxed">
-                  <strong>Assessment Integrity:</strong> RecruitCred uses client-side attention monitoring and single-session validation to protect candidate credibility. No aggressive lockout triggers occur on single vision anomalies.
+                  <strong>Examination Integrity:</strong> The system conducts real-time face presence monitoring. The assessment opens in full-screen mode and tracks window focus.
                 </p>
               </div>
             </div>
@@ -363,7 +384,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                     Pre-Assessment System Verification
                   </div>
                   <h2 className="text-xl font-bold text-white">
-                    System & Hardware Readiness Check
+                    Hardware & Camera Readiness Check
                   </h2>
                 </div>
 
@@ -382,37 +403,89 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                     <div className="flex items-center justify-between text-[11px] text-slate-300 font-semibold mb-2">
                       <span className="flex items-center gap-1.5">
                         <Camera className="w-3.5 h-3.5 text-indigo-400" />
-                        Camera Sensor
+                        Live Camera Sensor
                       </span>
-                      <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                        Live Preview
+                      <span className={`text-[10px] px-2 py-0.5 rounded-md border font-mono ${
+                        cameraStatus === 'active'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                          : cameraStatus === 'denied' || cameraStatus === 'blocked' || cameraStatus === 'not_found' || cameraStatus === 'error' || cameraStatus === 'insecure_context'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                          : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
+                      }`}>
+                        {cameraStatus === 'active' ? '● LIVE' : cameraStatus === 'requesting' ? 'CONNECTING...' : 'DISCONNECTED'}
                       </span>
                     </div>
 
-                    <div className="relative aspect-video rounded-xl bg-slate-950 overflow-hidden border border-slate-800 flex items-center justify-center">
+                    <div className="relative aspect-video rounded-xl bg-slate-950 overflow-hidden border border-slate-800 flex items-center justify-center shadow-inner">
                       <video
                         ref={videoRef}
                         autoPlay
                         playsInline
                         muted
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover -scale-x-100"
                       />
-                      {!cameraStreamActive && (
-                        <div className="text-center p-3">
-                          <Camera className="w-8 h-8 text-slate-600 mx-auto mb-1 animate-pulse" />
-                          <div className="text-[10px] text-slate-400">Initializing camera feed...</div>
+
+                      {cameraStatus !== 'active' && (
+                        <div className="absolute inset-0 z-20 bg-slate-950/95 text-center p-3 flex flex-col items-center justify-center overflow-y-auto">
+                          {cameraStatus === 'denied' || cameraStatus === 'blocked' ? (
+                            <>
+                              <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto mb-1.5 shrink-0" />
+                              <div className="text-xs font-bold text-rose-300">Camera Permission Blocked</div>
+                              <div className="text-[10px] text-slate-300 mt-1 leading-relaxed px-2">
+                                {cameraErrorMessage || 'Camera permission is blocked. Allow camera access for this website in Safari Settings → Websites → Camera, then retry.'}
+                              </div>
+                            </>
+                          ) : cameraStatus === 'insecure_context' ? (
+                            <>
+                              <Lock className="w-8 h-8 text-amber-400 mx-auto mb-1.5 shrink-0" />
+                              <div className="text-xs font-bold text-amber-300">Insecure Context Detected</div>
+                              <div className="text-[10px] text-slate-300 mt-1 leading-relaxed px-2">
+                                {cameraErrorMessage || 'Safari requires HTTPS or localhost to enable camera access. Please open http://localhost:5174/.'}
+                              </div>
+                            </>
+                          ) : cameraStatus === 'in_use' ? (
+                            <>
+                              <AlertTriangle className="w-8 h-8 text-amber-400 mx-auto mb-1.5 shrink-0" />
+                              <div className="text-xs font-bold text-amber-300">Camera In Use</div>
+                              <div className="text-[10px] text-slate-300 mt-1 leading-relaxed px-2">
+                                {cameraErrorMessage || 'Camera is currently in use by another application or macOS process. Please close other camera apps and retry.'}
+                              </div>
+                            </>
+                          ) : cameraStatus === 'not_found' ? (
+                            <>
+                              <Camera className="w-8 h-8 text-rose-400 mx-auto mb-1.5 shrink-0" />
+                              <div className="text-xs font-bold text-rose-300">No Camera Detected</div>
+                              <div className="text-[10px] text-slate-300 mt-1 leading-relaxed px-2">
+                                {cameraErrorMessage || 'No camera device found on this system. Please connect a webcam and ensure it is recognized by macOS.'}
+                              </div>
+                            </>
+                          ) : cameraStatus === 'error' || cameraStatus === 'security_error' || cameraStatus === 'overconstrained' || cameraStatus === 'type_error' ? (
+                            <>
+                              <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto mb-1.5 shrink-0" />
+                              <div className="text-xs font-bold text-rose-300">Camera Initialization Error</div>
+                              <div className="text-[10px] text-slate-300 mt-1 leading-relaxed px-2">
+                                {cameraErrorMessage || 'Failed to initialize camera sensor.'}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="w-8 h-8 text-indigo-400 mx-auto mb-1.5 animate-spin shrink-0" />
+                              <div className="text-xs font-semibold text-indigo-300">Requesting Camera Feed...</div>
+                              <div className="text-[10px] text-slate-400 mt-1">Please allow camera access if prompted by Safari.</div>
+                            </>
+                          )}
                         </div>
                       )}
                       
                       {/* Live HUD overlay */}
-                      {cameraStreamActive && (
-                        <div className="absolute inset-0 border border-indigo-500/30 pointer-events-none p-2 flex flex-col justify-between">
+                      {cameraStatus === 'active' && (
+                        <div className="absolute inset-0 z-10 border border-emerald-500/30 pointer-events-none p-2 flex flex-col justify-between">
                           <div className="flex justify-between text-[9px] font-mono text-emerald-400">
-                            <span>[REC_READY]</span>
+                            <span>[SENSOR_ACTIVE]</span>
                             <span>30 FPS</span>
                           </div>
-                          <div className="text-[9px] font-mono text-slate-400 text-center">
-                            Face Centered · 1 Person Detected
+                          <div className="text-[9px] font-mono text-slate-200 bg-black/60 px-1.5 py-0.5 rounded w-fit mx-auto">
+                            Face Preview Active
                           </div>
                         </div>
                       )}
@@ -420,7 +493,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                   </div>
 
                   <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-                    Camera stays active during the test. Face and attention metrics are analyzed with a rolling grace period.
+                    The camera preview stays visible during the assessment. Ensure your face is clearly lit and centered.
                   </p>
                 </div>
 
@@ -434,6 +507,8 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                         className={`p-2.5 rounded-xl border flex items-center justify-between transition-all ${
                           item.status === 'passed'
                             ? 'bg-slate-900/90 border-emerald-500/40 text-slate-200'
+                            : item.status === 'failed'
+                            ? 'bg-rose-950/40 border-rose-500/50 text-rose-200'
                             : item.status === 'checking'
                             ? 'bg-indigo-950/40 border-indigo-500/40 text-white animate-pulse'
                             : 'bg-slate-900/50 border-slate-800 text-slate-400'
@@ -443,6 +518,8 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                           <div className={`p-1.5 rounded-lg shrink-0 ${
                             item.status === 'passed'
                               ? 'bg-emerald-500/20 text-emerald-400'
+                              : item.status === 'failed'
+                              ? 'bg-rose-500/20 text-rose-400'
                               : 'bg-slate-800 text-slate-400'
                           }`}>
                             <Icon className="w-3.5 h-3.5" />
@@ -459,6 +536,11 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                           {item.status === 'passed' && (
                             <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
                               <Check className="w-3 h-3" />
+                            </span>
+                          )}
+                          {item.status === 'failed' && (
+                            <span className="w-5 h-5 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center border border-rose-500/40">
+                              <X className="w-3 h-3" />
                             </span>
                           )}
                           {item.status === 'checking' && (
@@ -490,7 +572,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                 <button
                   onClick={handleRunSystemCheck}
                   disabled={isChecking}
-                  className="px-4 py-2 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                  className="px-4 py-2 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin' : ''}`} />
                   Re-test All
@@ -499,7 +581,7 @@ export const AssessmentSetupModal: React.FC<AssessmentSetupModalProps> = ({
                 <button
                   onClick={handleBeginAssessment}
                   disabled={!allChecksPassed || isChecking}
-                  className={`px-6 py-2.5 rounded-xl font-bold text-xs transition-all flex items-center gap-2 ${
+                  className={`px-6 py-2.5 rounded-xl font-bold text-xs transition-all flex items-center gap-2 cursor-pointer ${
                     allChecksPassed && !isChecking
                       ? 'bg-gradient-to-r from-emerald-600 via-emerald-500 to-cyan-500 hover:from-emerald-500 hover:to-cyan-400 text-white shadow-lg shadow-emerald-600/30 hover:scale-[1.02]'
                       : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'

@@ -24,6 +24,7 @@ import { RecruitmentActivityView } from './components/recruiter/RecruitmentActiv
 import { SignInModal } from './components/auth/SignInModal';
 import { GetStartedModal } from './components/auth/GetStartedModal';
 import { CredAIChatbot } from './components/chat/CredAIChatbot';
+import { PublicProfileView } from './components/profile/PublicProfileView';
 
 export const AppContent: React.FC = () => {
   const {
@@ -34,6 +35,9 @@ export const AppContent: React.FC = () => {
     openAuthModal,
     closeAuthModal
   } = useApp();
+
+  const publicProfileUsername = window.location.pathname.match(/^\/u\/([a-zA-Z0-9_]+)\/?$/)?.[1]?.toLowerCase();
+  const isPublicProfileRoute = Boolean(publicProfileUsername);
 
   const renderActivePage = () => {
     switch (currentPage) {
@@ -82,8 +86,21 @@ export const AppContent: React.FC = () => {
 
   const isLandingView = !isAuthenticated || currentPage === 'landing';
 
+  if (isPublicProfileRoute) {
+    return <PublicProfileView username={publicProfileUsername!} />;
+  }
+
+  // Dedicated Secure Assessment Examination View (Completely hides Dashboard, Navbar, Sidebar, and Chatbot)
+  if (currentPage === 'assessment-runner') {
+    return (
+      <div className="fixed inset-0 z-50 bg-[#070A10] text-slate-100 flex flex-col overflow-hidden select-none">
+        <AssessmentRunnerView />
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-[#0E111F] text-slate-100 flex flex-col selection:bg-[#6C63FF] selection:text-white">
+    <div className="min-h-screen bg-[#0B1517] text-slate-100 flex flex-col selection:bg-cyan-500 selection:text-white">
       {/* Top Navbar */}
       <Navbar onOpenAuth={openAuthModal} />
 

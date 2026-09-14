@@ -70,6 +70,8 @@ export interface User {
   avatar: string;
   bio: string;
   email?: string;
+  emailVerified?: boolean;
+  passwordHash?: string;
   education: string;
   college?: string;
   branch?: string;
@@ -265,6 +267,10 @@ export interface AssessmentAttempt {
   attemptNumber?: number;
   verificationContribution?: string;
   integrityStatus?: 'Normal' | 'Attention Required' | 'Additional Verification Recommended';
+  integrityPenalty?: number;
+  integrityEvents?: IntegrityEvent[];
+  autoSubmitted?: boolean;
+  terminationReason?: string;
 }
 
 export interface AssessmentAssignment {
@@ -323,7 +329,19 @@ export interface SkillProgressionRoadmap {
 
 export interface IntegrityEvent {
   id: string;
-  type: 'camera_interruption' | 'focus_loss' | 'multiple_faces' | 'face_missing' | 'fullscreen_exit' | 'copy_paste' | 'session_heartbeat';
+  type:
+    | 'camera_interruption'
+    | 'additional_camera'
+    | 'focus_loss'
+    | 'multiple_faces'
+    | 'face_missing'
+    | 'fullscreen_exit'
+    | 'copy_paste'
+    | 'session_heartbeat'
+    | 'multiple_people_critical'
+    | 'prohibited_object'
+    | 'gaze_deviation'
+    | 'presence_loss';
   timestamp: string;
   severity: 'low' | 'medium' | 'high';
   details: string;

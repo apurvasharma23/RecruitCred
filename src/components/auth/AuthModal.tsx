@@ -34,7 +34,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -50,7 +50,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setError('Please enter your email.');
         return;
       }
-      const success = login(email.trim(), password.trim());
+      const success = await login(email.trim(), password.trim());
       if (success) {
         onClose();
       } else {

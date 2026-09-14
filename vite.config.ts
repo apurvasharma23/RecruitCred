@@ -1,89 +1,28 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {
-  handleBackendCreateOrder,
-  handleBackendVerifyPayment,
-  handleBackendWebhook,
-  getBackendPaymentConfig
-} from './src/server/paymentBackend';
+import { handleApiRequest } from './src/server/apiRouter';
 
-function paymentApiPlugin() {
+function recruitCredApiPlugin() {
   return {
-    name: 'payment-api-plugin',
+    name: 'recruitcred-api-plugin',
     configureServer(server: any) {
       server.middlewares.use(async (req: any, res: any, next: any) => {
-        if (!req.url?.startsWith('/api/payments')) {
+        if (!req.url?.startsWith('/api/')) {
           return next();
         }
 
-        const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-        const pathname = url.pathname;
-
-        res.setHeader('Content-Type', 'application/json');
-
-        if (req.method === 'GET' && pathname === '/api/payments/config') {
-          const config = getBackendPaymentConfig();
-          res.end(JSON.stringify({
-            keyId: config.keyId,
-            planPriceINR: config.planPriceINR,
-            amountInPaise: config.amountInPaise,
-            currency: config.currency,
-            mode: config.mode,
-            isRealKeysConfigured: config.isRealKeysConfigured
-          }));
-          return;
+        const handled = await handleApiRequest(req, res);
+        if (!handled) {
+          next();
         }
-
-        if (req.method === 'POST') {
-          let bodyStr = '';
-          req.on('data', (chunk: any) => { bodyStr += chunk; });
-          req.on('end', async () => {
-            try {
-              let body: any = {};
-              try { body = JSON.parse(bodyStr); } catch {}
-
-              if (pathname === '/api/payments/create-order') {
-                const result = await handleBackendCreateOrder(body);
-                res.writeHead(200);
-                res.end(JSON.stringify(result));
-                return;
-              }
-
-              if (pathname === '/api/payments/verify') {
-                const result = await handleBackendVerifyPayment(body);
-                res.writeHead(200);
-                res.end(JSON.stringify(result));
-                return;
-              }
-
-              if (pathname === '/api/payments/webhook') {
-                const signature = (req.headers['x-razorpay-signature'] as string) || '';
-                const result = await handleBackendWebhook(bodyStr, signature);
-                res.writeHead(200);
-                res.end(JSON.stringify(result));
-                return;
-              }
-
-              res.writeHead(404);
-              res.end(JSON.stringify({ error: 'Endpoint not found' }));
-            } catch (err: any) {
-              console.error('[Payment API Server Error]:', err.message);
-              res.writeHead(400);
-              res.end(JSON.stringify({ error: err.message || 'Payment server processing error' }));
-            }
-          });
-          return;
-        }
-
-        next();
       });
     }
   };
 }
 
 export default defineConfig({
-  plugins: [react(), paymentApiPlugin()],
+  plugins: [react(), recruitCredApiPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -17,7 +17,8 @@ import {
   RecruitmentRequirement,
   CandidateShortlistRecord,
   RecruiterActivityRecord,
-  RecruiterCompanyProfile
+  RecruiterCompanyProfile,
+  IntegrityEvent
 } from '../types';
 import {
   createProOrder as apiCreateProOrder,
@@ -80,6 +81,15 @@ export interface SignupData {
   leetcodeUsername?: string;
 }
 
+import {
+  apiLogin,
+  apiLogout
+} from '../services/auth/authService';
+import {
+  apiStartAssessment,
+  apiSubmitAssessment
+} from '../services/api/assessmentService';
+
 export interface AppContextType {
   // Auth state & Role
   isAuthenticated: boolean;
@@ -89,10 +99,13 @@ export interface AppContextType {
   isAuthModalOpen: boolean;
   authModalMode: 'signin' | 'signup';
   isFirstTimeUser: boolean;
+  activeAssessmentSessionId: string | null;
+  setActiveAssessmentSessionId: (id: string | null) => void;
   openAuthModal: (mode?: 'signin' | 'signup' | 'login') => void;
   closeAuthModal: () => void;
-  login: (identifier: string, password?: string) => boolean;
+  login: (identifier: string, password?: string) => Promise<{ success: boolean; error?: string }>;
   signup: (dataOrName: SignupData | string, email?: string, password?: string, role?: string) => void;
+  syncUserSession: (user: any) => void;
   isUsernameAvailable: (username: string) => boolean;
   logout: () => void;
   loginAsDemoUser: (userId: string) => void;
@@ -150,7 +163,12 @@ export interface AppContextType {
   
   // Assessment Actions
   startAssessment: (assessmentId: string) => void;
-  submitAssessment: (assessmentId: string, answers: { [qId: string]: number }, timeSpentSeconds: number) => AssessmentAttempt;
+  submitAssessment: (assessmentId: string, answers: { [qId: string]: number }, timeSpentSeconds: number, integrity?: {
+    events?: IntegrityEvent[];
+    status?: AssessmentAttempt['integrityStatus'];
+    autoSubmitted?: boolean;
+    terminationReason?: string;
+  }) => AssessmentAttempt;
   
   // Teams & Matching Actions
   createTeam: (teamData: Omit<Team, 'id' | 'leaderId' | 'members' | 'challengesSent'>) => void;
@@ -275,6 +293,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
   const [selectedAttemptId, setSelectedAttemptId] = useState<string | null>(null);
+  const [activeAssessmentSessionId, setActiveAssessmentSessionId] = useState<string | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [selectedHackathonId, setSelectedHackathonId] = useState<string | null>('hack-ai-innovate');
   const [activeChallengeToTake, setActiveChallengeToTake] = useState<TeamChallenge | null>(null);
@@ -476,6 +495,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [isFirstTimeUser, setIsFirstTimeUser] = useState<boolean>(false);
 
+  // Sync user session directly from verified server responses
+  const syncUserSession = (serverUser: any) => {
+    if (!serverUser) return;
+    const formattedUser: User = {
+      ...serverUser,
+      id: serverUser.id,
+      name: serverUser.name || serverUser.fullName,
+      username: serverUser.uniqueUserId || serverUser.username,
+      skills: serverUser.skills || [],
+      projects: serverUser.projects || [],
+      certifications: serverUser.certifications || []
+    };
+
+    setUsers(prev => {
+      const exists = prev.some(u => u.id === formattedUser.id || u.username === formattedUser.username);
+      if (exists) {
+        return prev.map(u => u.id === formattedUser.id ? { ...u, ...formattedUser } : u);
+      }
+      return [formattedUser, ...prev];
+    });
+
+    setCurrentUserId(formattedUser.id);
+    setIsAuthenticated(true);
+    setIsFirstTimeUser(false);
+    const isUserRecruiter = Boolean(
+      formattedUser.accountType === 'recruiter' ||
+      (formattedUser.role && formattedUser.role.toLowerCase().includes('recruiter')) ||
+      formattedUser.id === 'user-rohan'
+    );
+    setCurrentPage(isUserRecruiter ? 'recruiter-dashboard' : 'dashboard');
+  };
+
   // Auth actions
   const isUsernameAvailable = (username: string): boolean => {
     if (!username || username.trim().length < 3) return false;
@@ -483,13 +534,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return !users.some(u => u.username.toLowerCase() === normalized);
   };
 
-  const login = (identifier: string, _password?: string): boolean => {
+  const login = async (identifier: string, password?: string): Promise<{ success: boolean; error?: string }> => {
+    const res = await apiLogin(identifier, password);
+    if (res.success && res.user) {
+      syncUserSession(res.user);
+      return { success: true };
+    }
+
+    // Fallback for local demo usernames if server is in demo mode
     const normalized = identifier.trim().toLowerCase();
     const foundUser = users.find(
       u => u.username.toLowerCase() === normalized || 
            u.id.toLowerCase() === normalized || 
-           (u.githubUsername && u.githubUsername.toLowerCase() === normalized) ||
-           (u.name && u.name.toLowerCase() === normalized)
+           (u.email && u.email.toLowerCase() === normalized)
     );
     if (foundUser) {
       setCurrentUserId(foundUser.id);
@@ -497,32 +554,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setIsAuthenticated(true);
       const isUserRecruiter = Boolean(
         foundUser.accountType === 'recruiter' ||
-        (foundUser.role && (
-          foundUser.role.toLowerCase().includes('recruiter') ||
-          foundUser.role.toLowerCase().includes('hiring') ||
-          foundUser.role.toLowerCase().includes('talent acquisition')
-        )) ||
+        (foundUser.role && foundUser.role.toLowerCase().includes('recruiter')) ||
         foundUser.id === 'user-rohan'
       );
       setCurrentPage(isUserRecruiter ? 'recruiter-dashboard' : 'dashboard');
-      return true;
+      return { success: true };
     }
-    // Demo fallback shortcuts
-    if (normalized.includes('rahul') || normalized.includes('student')) {
-      setCurrentUserId('user-rahul');
-      setIsFirstTimeUser(false);
-      setIsAuthenticated(true);
-      setCurrentPage('dashboard');
-      return true;
-    }
-    if (normalized.includes('rohan') || normalized.includes('recruiter') || normalized.includes('lead')) {
-      setCurrentUserId('user-rohan');
-      setIsFirstTimeUser(false);
-      setIsAuthenticated(true);
-      setCurrentPage('recruiter-dashboard');
-      return true;
-    }
-    return false;
+
+    return { success: false, error: res.error || 'Incorrect RecruitCred ID or password. Please try again.' };
   };
 
   const signup = (
@@ -536,6 +575,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const username = isObject && dataOrName.username
       ? dataOrName.username.trim().toLowerCase()
       : (email ? email.split('@')[0].replace(/[^a-z0-9_]/gi, '').toLowerCase() : `user_${Date.now()}`);
+    const normalizedEmail = (isObject ? dataOrName.email : email || '').trim().toLowerCase();
+    if (users.some(u => u.username.toLowerCase() === username || u.email?.toLowerCase() === normalizedEmail)) {
+      return;
+    }
     const userCollege = isObject && dataOrName.college ? dataOrName.college : 'Thapar Institute of Engineering & Technology';
     const userBranch = isObject && dataOrName.branch ? dataOrName.branch : 'Computer Science & Engineering';
     const userGradYear = isObject && dataOrName.gradYear ? dataOrName.gradYear : '2026';
@@ -546,7 +589,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const newUserId = `user-${Date.now()}`;
 
-    // Initial claimed skills from onboarding selection (if any)
     const initialSkillNames = isObject && dataOrName.skills && dataOrName.skills.length > 0
       ? dataOrName.skills
       : ['Python', 'C++', 'SQL'];
@@ -578,6 +620,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? `Talent Acquisition Lead at partner technology enterprise.`
         : `Enthusiastic ${userBranch} student at ${userCollege} building evidence-backed technical competencies.`,
       education: `B.Tech in ${userBranch}, ${userCollege}`,
+      email: normalizedEmail,
+      emailVerified: true,
+      passwordHash: btoa(isObject ? dataOrName.password || '' : _password || ''),
       college: userCollege,
       branch: userBranch,
       gradYear: userGradYear,
@@ -612,21 +657,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsFirstTimeUser(true);
     setIsAuthenticated(true);
     setCurrentPage(userAccountType === 'recruiter' ? 'recruiter-dashboard' : 'dashboard');
-
-    setActivities(prev => [
-      {
-        id: `act-${Date.now()}`,
-        type: 'team_join',
-        title: 'Account Created & Initialized',
-        description: `Welcome to RecruitCred, ${name}! Your profile has been initialized.`,
-        timestamp: 'Just now',
-        verified: true
-      },
-      ...prev
-    ]);
   };
 
-  const logout = () => {
+  const logout = async () => {
+    await apiLogout();
     setIsAuthenticated(false);
     localStorage.removeItem(`${STORAGE_KEY}_auth`);
     setCurrentPage('landing');
@@ -761,16 +795,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     ]);
   };
 
-  // Start Assessment
-  const startAssessment = (assessmentId: string) => {
+  // Start Assessment with server-backed session
+  const startAssessment = async (assessmentId: string) => {
     setSelectedAssessmentId(assessmentId);
+    try {
+      const res = await apiStartAssessment(currentUserId, assessmentId);
+      if (res.success && res.session) {
+        setActiveAssessmentSessionId(res.session.id);
+      }
+    } catch {}
     setCurrentPage('assessment-runner');
   };
 
-  // Submit Assessment
-  const submitAssessment = (assessmentId: string, answers: { [qId: string]: number }, timeSpentSeconds: number): AssessmentAttempt => {
+  // Submit Assessment with server-backed evaluation
+  const submitAssessment = (assessmentId: string, answers: { [qId: string]: number }, timeSpentSeconds: number, integrity?: {
+    events?: IntegrityEvent[];
+    status?: AssessmentAttempt['integrityStatus'];
+    autoSubmitted?: boolean;
+    terminationReason?: string;
+  }): AssessmentAttempt => {
     const assessment = assessments.find(a => a.id === assessmentId) || COMPREHENSIVE_ASSESSMENTS.find(a => a.id === assessmentId);
     if (!assessment) throw new Error('Assessment not found');
+
+    // Call backend submit asynchronously to record on server
+    apiSubmitAssessment({
+      sessionId: activeAssessmentSessionId || undefined,
+      userId: currentUserId,
+      assessmentId,
+      answers,
+      timeSpentSeconds,
+      integrity: {
+        autoSubmitted: integrity?.autoSubmitted,
+        terminationReason: integrity?.terminationReason,
+        events: integrity?.events
+      }
+    }).catch(err => console.warn('[Backend Submit Sync Error]:', err));
 
     let correctCount = 0;
     assessment.questions.forEach(q => {
@@ -779,7 +838,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    const accuracy = Math.round((correctCount / assessment.questions.length) * 100);
+    const rawAccuracy = Math.round((correctCount / assessment.questions.length) * 100);
+    const integrityEvents = integrity?.events || [];
+    const integrityPenalty = Math.min(35, integrityEvents.reduce((penalty, event) => {
+      if (event.severity === 'high' || event.type === 'multiple_people_critical') return penalty + 15;
+      if (event.severity === 'medium') return penalty + 7;
+      return penalty + 2;
+    }, 0));
+    const accuracy = Math.max(0, rawAccuracy - integrityPenalty);
     const passed = accuracy >= assessment.passingScore;
     
     let level: 'Beginner' | 'Intermediate' | 'Advanced' | 'Expert' = 'Intermediate';
@@ -802,7 +868,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       submittedAt: new Date().toISOString(),
       level,
       answers,
-      passed
+      passed,
+      integrityPenalty,
+      integrityEvents,
+      integrityStatus: integrity?.status || 'Normal',
+      autoSubmitted: integrity?.autoSubmitted,
+      terminationReason: integrity?.terminationReason
     };
 
     setAttempts(prev => [newAttempt, ...prev]);
@@ -858,7 +929,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         id: `act-${Date.now()}`,
         type: 'assessment',
         title: `${assessment.skillName} Assessment ${passed ? 'Verified' : 'Completed'}`,
-        description: `Scored ${accuracy}% (${correctCount}/${assessment.questions.length} correct). Level: ${level}.`,
+        description: `Scored ${accuracy}% after ${integrityPenalty}% integrity adjustment (${correctCount}/${assessment.questions.length} correct). Level: ${level}.`,
         timestamp: 'Just now',
         badge: `${accuracy}%`,
         verified: passed
@@ -1463,10 +1534,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isAuthModalOpen,
         authModalMode,
         isFirstTimeUser,
+        activeAssessmentSessionId,
+        setActiveAssessmentSessionId,
         openAuthModal,
         closeAuthModal,
         login,
         signup,
+        syncUserSession,
         isUsernameAvailable,
         logout,
         loginAsDemoUser,

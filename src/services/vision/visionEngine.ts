@@ -19,6 +19,7 @@ export type MonitoringState =
   | 'LOOKING_AWAY'
   | 'MULTIPLE_FACES'
   | 'FACE_MISSING'
+  | 'BLACK_SCREEN'
   | 'CAMERA_INTERRUPTED'
   | 'VISION_UNAVAILABLE';
 
@@ -76,6 +77,7 @@ export interface VisionMetrics {
   cameraConnected: boolean;
   faceDetected: boolean;
   faceCount: number;
+  personCount: number;
   rawDetectionsCount: number;
   uniqueFacesCount: number;
   trackedFacesCount: number;
@@ -104,6 +106,18 @@ export interface VisionMetrics {
   state: MonitoringState;
   stateMessage: string;
   calibrationProgress: number; // 0 to 100%
+  diagnostics: {
+    cameraStatusText: 'LIVE' | 'DISCONNECTED' | 'INACTIVE';
+    videoResolution: string;
+    frameStatusText: 'VALID' | 'INVALID' | 'BLACK_SCREEN';
+    facesDetected: number;
+    personsDetected: number;
+    faceConfidence: number;
+    faceStable: boolean;
+    faceLostDurationMs: number;
+    multiplePerson: boolean;
+    proctoringState: string;
+  };
   debugInfo: {
     baselineEAR: number;
     blinkThreshold: number;
@@ -117,6 +131,7 @@ export interface VisionMetrics {
     rawCount: number;
     uniqueCount: number;
     trackedCount: number;
+    personCount: number;
   };
 }
 
@@ -223,6 +238,7 @@ export class VisionEngine {
   private sustainedMultipleFaceTimeMs: number = 0;
   private sustainedFaceMissingTimeMs: number = 0;
   private sustainedGazeDeviationTimeMs: number = 0;
+  private sustainedBlackScreenTimeMs: number = 0;
 
   // Blink temporal state machine
   private eyeState: EyeState = 'OPEN';
@@ -246,20 +262,46 @@ export class VisionEngine {
     forcedModelError?: boolean;
   } = { active: false };
 
+  // Persistent face memory & temporal bridge
+  private lastKnownValidFace: DetectedFace | null = null;
+  private lastFaceSeenTimestamp: number = 0;
+
+  // Temporal rolling sliding windows for consensus face & person counts
+  private faceCountHistory: number[] = [];
+  private personCountHistory: number[] = [];
+
+  private computeStableFaceCount(currentCount: number): number {
+    this.faceCountHistory.push(currentCount);
+    if (this.faceCountHistory.length > 15) {
+      this.faceCountHistory.shift();
+    }
+    const sorted = [...this.faceCountHistory].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  private computeStablePersonCount(currentCount: number): number {
+    this.personCountHistory.push(currentCount);
+    if (this.personCountHistory.length > 15) {
+      this.personCountHistory.shift();
+    }
+    const sorted = [...this.personCountHistory].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
   constructor(config?: VisionEngineConfig) {
     this.config = {
       targetFps: config?.targetFps ?? 15,
       faceConfirmationMs: config?.faceConfirmationMs ?? 500,
-      multipleFaceConfirmationMs: config?.multipleFaceConfirmationMs ?? 700,
-      faceLostGraceMs: config?.faceLostGraceMs ?? 2500,
+      multipleFaceConfirmationMs: config?.multipleFaceConfirmationMs ?? 2200,
+      faceLostGraceMs: config?.faceLostGraceMs ?? 5000,
       gazeWarningMs: config?.gazeWarningMs ?? 2800,
       blinkWindowMs: config?.blinkWindowMs ?? 14000,
       yawThresholdDeg: config?.yawThresholdDeg ?? 18,
       pitchThresholdDeg: config?.pitchThresholdDeg ?? 16,
       blinkThresholdMultiplier: config?.blinkThresholdMultiplier ?? 0.72,
       duplicateIoUThreshold: config?.duplicateIoUThreshold ?? 0.15,
-      faceCenterMergeRatio: config?.faceCenterMergeRatio ?? 0.65,
-      minFaceConfidence: config?.minFaceConfidence ?? 0.40
+      faceCenterMergeRatio: config?.faceCenterMergeRatio ?? 0.85,
+      minFaceConfidence: config?.minFaceConfidence ?? 0.50
     };
 
     this.blinkThreshold = this.baselineEAR * this.config.blinkThresholdMultiplier;
@@ -446,7 +488,7 @@ export class VisionEngine {
   private processFrame(deltaMs: number) {
     const now = Date.now();
 
-    // 1. Camera Connection Check
+    // 1. Camera Connection & Video Track Live Check
     const isCameraConnected =
       !this.simulationOverride.forcedCameraDrop &&
       this.videoElement !== null &&
@@ -454,7 +496,19 @@ export class VisionEngine {
       !this.videoElement.paused &&
       !this.videoElement.ended;
 
-    if (!isCameraConnected) {
+    let isVideoTrackLive = false;
+    let videoWidth = 0;
+    let videoHeight = 0;
+
+    if (isCameraConnected && this.videoElement) {
+      const stream = this.videoElement.srcObject as MediaStream;
+      const tracks = stream ? stream.getVideoTracks() : [];
+      isVideoTrackLive = tracks.length > 0 && tracks[0].readyState === 'live';
+      videoWidth = this.videoElement.videoWidth || 320;
+      videoHeight = this.videoElement.videoHeight || 240;
+    }
+
+    if (!isCameraConnected || !isVideoTrackLive) {
       this.currentState = 'CAMERA_INTERRUPTED';
       this.eyeState = 'UNRELIABLE';
       this.faceTrackingState = 'NO_FACE';
@@ -462,6 +516,7 @@ export class VisionEngine {
         cameraConnected: false,
         faceDetected: false,
         faceCount: 0,
+        personCount: 0,
         rawDetectionsCount: 0,
         uniqueFacesCount: 0,
         trackedFacesCount: 0,
@@ -490,8 +545,14 @@ export class VisionEngine {
         state: 'CAMERA_INTERRUPTED',
         stateMessage: 'Camera connection was interrupted. Your assessment is paused until camera verification is restored.',
         calibrationProgress: 0,
+        diagnostics: this.buildDiagnostics(false, false, 0, 0, false, 0, 0),
         debugInfo: this.getDebugInfo()
       });
+      return;
+    }
+
+    // Check if video element is ready for frame rendering
+    if (this.videoElement && (this.videoElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || videoWidth <= 0 || videoHeight <= 0)) {
       return;
     }
 
@@ -504,6 +565,7 @@ export class VisionEngine {
         cameraConnected: true,
         faceDetected: false,
         faceCount: 0,
+        personCount: 0,
         rawDetectionsCount: 0,
         uniqueFacesCount: 0,
         trackedFacesCount: 0,
@@ -532,12 +594,15 @@ export class VisionEngine {
         state: 'VISION_UNAVAILABLE',
         stateMessage: 'Camera verification could not be initialized. Please restart the system check.',
         calibrationProgress: 0,
+        diagnostics: this.buildDiagnostics(true, true, videoWidth, videoHeight, false, 0, 0),
         debugInfo: this.getDebugInfo()
       });
       return;
     }
 
-    // 3. Draw video frame to canvas
+    // 3. Draw video frame to canvas & evaluate luminance
+    let isPitchBlack = false;
+    let avgLum = 100;
     if (this.ctx && this.videoElement && this.videoElement.videoWidth > 0) {
       this.ctx.drawImage(
         this.videoElement,
@@ -546,6 +611,67 @@ export class VisionEngine {
         this.canvas.width,
         this.canvas.height
       );
+
+      try {
+        const imgData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        const d = imgData.data;
+        let totalLum = 0;
+        let samples = 0;
+        for (let i = 0; i < d.length; i += 32) {
+          totalLum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          samples++;
+        }
+        avgLum = samples > 0 ? totalLum / samples : 0;
+        isPitchBlack = avgLum < 5.0; // Uniformly black / blocked camera
+      } catch { }
+    }
+
+    if (isPitchBlack) {
+      this.sustainedBlackScreenTimeMs += deltaMs;
+      if (this.sustainedBlackScreenTimeMs >= 2000) {
+        this.currentState = 'BLACK_SCREEN';
+        this.eyeState = 'UNRELIABLE';
+        this.faceTrackingState = 'NO_FACE';
+        this.emitMetrics({
+          cameraConnected: true,
+          faceDetected: false,
+          faceCount: 0,
+          personCount: 0,
+          rawDetectionsCount: 0,
+          uniqueFacesCount: 0,
+          trackedFacesCount: 0,
+          faceConfidence: 0,
+          faceTrackingState: 'NO_FACE',
+          landmarksDetected: false,
+          eyeMonitoringActive: false,
+          eyeState: 'UNRELIABLE',
+          faces: [],
+          leftEAR: 0,
+          rightEAR: 0,
+          averageEAR: 0,
+          baselineEAR: this.baselineEAR,
+          blinkThreshold: this.blinkThreshold,
+          blinkDetected: false,
+          blinkCount: this.blinkCount,
+          lastBlinkTimestamp: this.lastBlinkTimestamp,
+          lastBlinkDurationMs: this.lastBlinkDurationMs,
+          yawDegrees: 0,
+          pitchDegrees: 0,
+          gazeDirection: 'CENTER',
+          gazeDeviationMagnitude: 0,
+          cameraActive: true,
+          modelLoaded: true,
+          processingFps: this.currentFps || this.config.targetFps,
+          state: 'BLACK_SCREEN',
+          stateMessage: 'Camera preview appears black or obstructed. Please uncover camera lens.',
+          calibrationProgress: 0,
+          diagnostics: this.buildDiagnostics(true, true, videoWidth, videoHeight, true, 0, 0),
+          debugInfo: this.getDebugInfo()
+        });
+        return;
+      }
+    } else {
+      this.sustainedBlackScreenTimeMs = Math.max(0, this.sustainedBlackScreenTimeMs - deltaMs * 2);
     }
 
     // 4. Calculate processing FPS
@@ -556,15 +682,25 @@ export class VisionEngine {
       this.lastFpsUpdateTime = now;
     }
 
-    // 5. Detect Faces with IoU NMS Duplicate Suppression
+    // 5. Detect Faces with IoU NMS Duplicate Suppression & Facial Landmark Confirmation
     const detectedFaces = this.detectFacesFromFrame();
-    
+
     // Update frame-to-frame tracking
     this.updateFaceTracking(detectedFaces, now);
 
+    // Compute temporally stable consensus face & person counts (rolling median over recent frames)
+    const rawFaceCount = detectedFaces.length;
+    const rawPersonCount = this.uniqueFacesCount;
+    const stableFaceCount = this.computeStableFaceCount(rawFaceCount);
+    const stablePersonCount = this.computeStablePersonCount(rawPersonCount);
+
     const effectiveFaceCount = this.simulationOverride.active && this.simulationOverride.forcedFaceCount !== undefined
       ? this.simulationOverride.forcedFaceCount
-      : this.trackedFacesCount;
+      : stableFaceCount;
+
+    const effectivePersonCount = this.simulationOverride.active && this.simulationOverride.forcedFaceCount !== undefined
+      ? this.simulationOverride.forcedFaceCount
+      : stablePersonCount;
 
     const faceDetected = effectiveFaceCount > 0;
     const isSingleCandidate = effectiveFaceCount === 1;
@@ -611,6 +747,7 @@ export class VisionEngine {
           cameraConnected: true,
           faceDetected: effectiveFaceCount > 0,
           faceCount: effectiveFaceCount,
+          personCount: effectivePersonCount,
           rawDetectionsCount: this.rawDetectionsCount,
           uniqueFacesCount: this.uniqueFacesCount,
           trackedFacesCount: this.trackedFacesCount,
@@ -639,6 +776,7 @@ export class VisionEngine {
           state: 'CALIBRATING',
           stateMessage: 'Look directly at the screen for a moment while we calibrate your camera.',
           calibrationProgress: progress,
+          diagnostics: this.buildDiagnostics(true, true, videoWidth, videoHeight, isPitchBlack, effectiveFaceCount, effectivePersonCount),
           debugInfo: this.getDebugInfo()
         });
         return;
@@ -663,12 +801,12 @@ export class VisionEngine {
     }
 
     const isGazeDeviated = gazeDirection !== 'CENTER';
-    const isExtremeHeadPose = Math.abs(normalizedYaw) > 22 || Math.abs(normalizedPitch) > 20;
+    const isExtremeHeadPose = Math.abs(normalizedYaw) > 24 || Math.abs(normalizedPitch) > 22;
     const gazeDeviationMagnitude = Math.round(
       Math.sqrt(normalizedYaw * normalizedYaw + normalizedPitch * normalizedPitch)
     );
 
-    // 8. Eye Monitoring Active Determination
+    // 8. Eye Monitoring Active Determination (Normal blink must NOT invalidate face presence)
     const eyeMonitoringActive = isSingleCandidate && !isExtremeHeadPose;
 
     // 9. Temporal Multi-Stage Eye-Blink State Machine
@@ -694,7 +832,7 @@ export class VisionEngine {
       } else {
         if (this.eyeState === 'CLOSED' || this.eyeState === 'CLOSING') {
           const closedDuration = now - this.eyeClosedStartTime;
-          if (closedDuration >= 70 && closedDuration <= 480) {
+          if (closedDuration >= 70 && closedDuration <= 500) {
             this.blinkCount++;
             this.lastBlinkTimestamp = now;
             this.lastBlinkDurationMs = closedDuration;
@@ -739,14 +877,19 @@ export class VisionEngine {
       this.sustainedGazeDeviationTimeMs = 0;
       this.faceTrackingState = 'NO_FACE';
 
+      // Sustained unbroken absence threshold (5.0s default)
       if (this.sustainedFaceMissingTimeMs >= this.config.faceLostGraceMs) {
         this.currentState = 'FACE_MISSING';
       }
     } else {
-      // Exactly 1 face
-      this.sustainedMultipleFaceTimeMs = Math.max(0, this.sustainedMultipleFaceTimeMs - deltaMs * 2.5);
-      this.sustainedFaceMissingTimeMs = Math.max(0, this.sustainedFaceMissingTimeMs - deltaMs * 2.5);
+      // Exactly 1 face stably confirmed: immediately reset absence timers
+      this.sustainedMultipleFaceTimeMs = 0;
+      this.sustainedFaceMissingTimeMs = 0;
       this.faceTrackingState = 'ONE_FACE';
+
+      if (this.currentState === 'FACE_MISSING') {
+        this.currentState = 'NORMAL';
+      }
 
       if (isGazeDeviated) {
         this.sustainedGazeDeviationTimeMs += deltaMs;
@@ -780,6 +923,7 @@ export class VisionEngine {
       cameraConnected: true,
       faceDetected,
       faceCount: effectiveFaceCount,
+      personCount: effectivePersonCount,
       rawDetectionsCount: this.rawDetectionsCount,
       uniqueFacesCount: this.uniqueFacesCount,
       trackedFacesCount: this.trackedFacesCount,
@@ -808,6 +952,7 @@ export class VisionEngine {
       state: this.currentState,
       stateMessage,
       calibrationProgress: 100,
+      diagnostics: this.buildDiagnostics(true, true, videoWidth, videoHeight, isPitchBlack, effectiveFaceCount, effectivePersonCount),
       debugInfo: this.getDebugInfo()
     });
   }
@@ -820,7 +965,7 @@ export class VisionEngine {
 
     detectedFaces.forEach(face => {
       let bestTrackId: number | null = null;
-      let minDistance = 75; // Pixel distance matching threshold
+      let minDistance = 85; // Pixel distance matching threshold
 
       this.trackedEntities.forEach((track, trackId) => {
         if (matchedTrackIds.has(trackId)) return;
@@ -863,18 +1008,19 @@ export class VisionEngine {
       }
     });
 
-    // Remove stale tracks that have not been seen for > 400ms
+    // Remove stale tracks that have not been seen in the active frame
     this.trackedEntities.forEach((track, trackId) => {
-      if (!matchedTrackIds.has(trackId) && now - track.lastSeenTimestamp > 400) {
+      if (!matchedTrackIds.has(trackId) && now - track.lastSeenTimestamp > 300) {
         this.trackedEntities.delete(trackId);
       }
     });
 
-    this.trackedFacesCount = this.trackedEntities.size;
+    this.trackedFacesCount = detectedFaces.length;
   }
 
   /**
    * Computer Vision Face & Landmark Detection with IoU NMS Duplicate Suppression
+   * and Multi-Colorspace Adaptive Skin / Head Segmentation
    */
   private detectFacesFromFrame(): DetectedFace[] {
     if (!this.ctx) return [];
@@ -885,7 +1031,7 @@ export class VisionEngine {
       const imageData = this.ctx.getImageData(0, 0, width, height);
       const data = imageData.data;
 
-      // Color-space Skin Luma/Chroma Segmenter (YCbCr representation)
+      // Multi-colorspace Adaptive Skin Luma/Chroma Segmenter (YCbCr + Normalized RGB + RGB)
       const skinGridWidth = 32;
       const skinGridHeight = 24;
       const blockW = width / skinGridWidth;
@@ -900,19 +1046,39 @@ export class VisionEngine {
           const g = data[idx + 1];
           const b = data[idx + 2];
 
-          // RGB to YCbCr conversion
+          // 1. YCbCr conversion
           const yVal = 0.299 * r + 0.587 * g + 0.114 * b;
           const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
           const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
 
-          const isSkin =
-            yVal > 40 &&
-            cb >= 75 &&
-            cb <= 135 &&
-            cr >= 130 &&
-            cr <= 180 &&
-            r > g &&
-            g > b;
+          const isSkinYCbCr =
+            yVal >= 28 &&
+            cb >= 65 &&
+            cb <= 142 &&
+            cr >= 120 &&
+            cr <= 188;
+
+          // 2. Normalized RGB (invariant to lighting/intensity changes)
+          const sum = r + g + b;
+          const nr = sum > 0 ? r / sum : 0;
+          const ng = sum > 0 ? g / sum : 0;
+          const isSkinNormRGB =
+            sum > 45 &&
+            nr >= 0.32 &&
+            nr <= 0.62 &&
+            ng >= 0.24 &&
+            ng <= 0.40 &&
+            nr >= ng;
+
+          // 3. Daylight / Fluorescent RGB heuristics
+          const isSkinRGB =
+            r > 38 &&
+            g > 24 &&
+            b > 14 &&
+            (Math.max(r, g, b) - Math.min(r, g, b) >= 8) &&
+            r >= g - 8;
+
+          const isSkin = isSkinYCbCr || (isSkinNormRGB && isSkinRGB);
 
           if (isSkin) {
             totalSkinPixels++;
@@ -923,9 +1089,23 @@ export class VisionEngine {
         }
       }
 
-      if (totalSkinPixels < 380) {
+      // If skin density is too low for raw segmentation:
+      if (totalSkinPixels < 110) {
         this.rawDetectionsCount = 0;
         this.uniqueFacesCount = 0;
+
+        // Temporal Face Continuity Bridge:
+        // If a valid candidate face was seen within the last 1500ms, maintain
+        // spatial continuity across single dropped frames / momentary blinks
+        const now = Date.now();
+        if (this.lastKnownValidFace && (now - this.lastFaceSeenTimestamp < 1500)) {
+          this.averageFaceConfidence = 0.85;
+          return [{
+            ...this.lastKnownValidFace,
+            confidence: 0.85
+          }];
+        }
+
         this.averageFaceConfidence = 0;
         return [];
       }
@@ -934,7 +1114,7 @@ export class VisionEngine {
       const rawClusters = this.findSkinClusters(skinDensity, skinGridWidth, skinGridHeight, blockW, blockH);
       this.rawDetectionsCount = rawClusters.length;
 
-      // 2. Spatial Non-Maximum Suppression (NMS) & Duplicate Cluster Merging
+      // 2. Spatial Non-Maximum Suppression (NMS) & Anatomical Primary Body-Part Suppression
       const uniqueClusters = this.suppressDuplicateDetections(rawClusters);
       this.uniqueFacesCount = uniqueClusters.length;
 
@@ -1018,6 +1198,12 @@ export class VisionEngine {
         };
       });
 
+      // Update primary persistent face memory
+      if (detectedFaces.length > 0) {
+        this.lastKnownValidFace = detectedFaces[0];
+        this.lastFaceSeenTimestamp = Date.now();
+      }
+
       return detectedFaces;
     } catch {
       return [this.createSyntheticFace(160, 120, 100, 120, this.baselineEAR)];
@@ -1025,66 +1211,108 @@ export class VisionEngine {
   }
 
   /**
-   * Spatial Non-Maximum Suppression (NMS) & Vertical/Adjacent Duplicate Merging:
-   * Merges fragmented skin blobs (such as neck, jawline, forehead) belonging to the same physical candidate.
+   * Spatial Non-Maximum Suppression (NMS) & Anatomical Body-Part Suppression:
+   * Isolates the primary human candidate and prevents neck, chest, arms, hands,
+   * hair, or reflections from being erroneously registered as secondary people.
    */
   private suppressDuplicateDetections(
     boxes: BoundingBox[]
   ): BoundingBox[] {
-    if (boxes.length <= 1) return boxes;
+    if (boxes.length === 0) return [];
+    if (boxes.length === 1) return boxes;
 
-    // Sort by confidence / score descending
-    const sorted = [...boxes].sort((a, b) => b.score - a.score);
-    const merged: BoundingBox[] = [];
+    const width = this.canvas.width;
+    const height = this.canvas.height;
 
-    while (sorted.length > 0) {
-      const current = sorted.shift()!;
-      let wasMergedWithExisting = false;
+    // 1. Calculate prominence score for each candidate box
+    // Face in upper-central region has maximum prominence
+    const scoredBoxes = boxes.map(b => {
+      const cx = b.x + b.width / 2;
+      const cy = b.y + b.height / 2;
+      const centerFactor = 1.0 - (Math.abs(cx - width / 2) / (width / 2)) * 0.35;
+      const verticalFactor = cy < height * 0.65 ? 1.25 : 0.40;
+      const area = b.width * b.height;
+      const prominence = b.score * area * centerFactor * verticalFactor;
+      return { box: b, prominence, cx, cy, area };
+    });
 
-      for (let i = 0; i < merged.length; i++) {
-        const target = merged[i];
-        const iou = computeIoU(current, target);
+    // Sort by prominence descending
+    scoredBoxes.sort((a, b) => b.prominence - a.prominence);
 
-        // Center distance
-        const cx1 = current.x + current.width / 2;
-        const cy1 = current.y + current.height / 2;
-        const cx2 = target.x + target.width / 2;
-        const cy2 = target.y + target.height / 2;
-        const centerDist = Math.sqrt(Math.pow(cx1 - cx2, 2) + Math.pow(cy1 - cy2, 2));
-        const avgWidth = (current.width + target.width) / 2;
+    const primary = scoredBoxes[0];
+    const confirmedPersons: BoundingBox[] = [];
 
-        // Vertical overlap (e.g. neck directly underneath face)
-        const isVerticallyAdjacent =
-          Math.abs(cx1 - cx2) < avgWidth * 0.45 &&
-          Math.abs(cy1 - cy2) < (current.height + target.height) * 0.70;
+    // Always include the primary candidate face
+    let primaryBox: BoundingBox = { ...primary.box };
 
-        // If high IoU OR close centers OR vertically attached neck/face
-        if (iou >= this.config.duplicateIoUThreshold || centerDist < avgWidth * this.config.faceCenterMergeRatio || isVerticallyAdjacent) {
-          // Merge bounding boxes
-          const newMinX = Math.min(target.x, current.x);
-          const newMinY = Math.min(target.y, current.y);
-          const newMaxX = Math.max(target.x + target.width, current.x + current.width);
-          const newMaxY = Math.max(target.y + target.height, current.y + current.height);
+    for (let i = 1; i < scoredBoxes.length; i++) {
+      const secondary = scoredBoxes[i];
+      const iou = computeIoU(primaryBox, secondary.box);
 
-          merged[i] = {
-            x: newMinX,
-            y: newMinY,
-            width: newMaxX - newMinX,
-            height: newMaxY - newMinY,
-            score: Math.max(target.score, current.score) + 15
+      // Center distance
+      const centerDist = Math.sqrt(
+        Math.pow(primary.cx - secondary.cx, 2) + Math.pow(primary.cy - secondary.cy, 2)
+      );
+      const primaryFaceDimension = Math.max(primary.box.width, primary.box.height);
+
+      // Check vertical attachment (neck, collar, chest directly below head)
+      const isNeckOrTorso =
+        secondary.cy >= primary.cy &&
+        Math.abs(secondary.cx - primary.cx) < primary.box.width * 0.85 &&
+        secondary.box.y < primary.box.y + primary.box.height * 1.5;
+
+      // Check proximity (hands touching face, ears, jaw, hair)
+      const isTouchingOrAdjacent =
+        centerDist < primaryFaceDimension * 1.10 ||
+        iou >= 0.10;
+
+      // Check lower desk area (hands typing or resting on desk)
+      const isLowerDeskNoise = secondary.cy > height * 0.68;
+
+      // Check relative size (small fragment vs full face)
+      const isTinyFragment =
+        secondary.area < primary.area * 0.38 ||
+        secondary.box.score < primary.box.score * 0.35;
+
+      if (isNeckOrTorso || isTouchingOrAdjacent || isLowerDeskNoise || isTinyFragment) {
+        // Merge into primary candidate bounding box if touching/attached
+        if (isTouchingOrAdjacent || isNeckOrTorso) {
+          const minX = Math.min(primaryBox.x, secondary.box.x);
+          const minY = Math.min(primaryBox.y, secondary.box.y);
+          const maxX = Math.max(primaryBox.x + primaryBox.width, secondary.box.x + secondary.box.width);
+          const maxY = Math.max(primaryBox.y + primaryBox.height, secondary.box.y + secondary.box.height);
+          primaryBox = {
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY,
+            score: Math.max(primaryBox.score, secondary.box.score) + 20
           };
-          wasMergedWithExisting = true;
-          break;
         }
+        // Suppress from separate person count
+        continue;
       }
 
-      if (!wasMergedWithExisting) {
-        merged.push(current);
+      // If we reach here, evaluate if this is a genuine SECOND PERSON:
+      // A genuine second person must have:
+      // 1. Large distinct face dimensions (>= 45x50)
+      // 2. Area at least 40% of primary face
+      // 3. Clear horizontal separation (Math.abs(secondary.cx - primary.cx) >= primary.box.width * 0.80)
+      // 4. Score >= 100
+      const isGenuineSecondPerson =
+        secondary.box.width >= 45 &&
+        secondary.box.height >= 50 &&
+        secondary.box.score >= 100 &&
+        secondary.area >= primary.area * 0.40 &&
+        Math.abs(secondary.cx - primary.cx) >= primary.box.width * 0.80;
+
+      if (isGenuineSecondPerson) {
+        confirmedPersons.push(secondary.box);
       }
     }
 
-    // Return at most 3 distinct candidates
-    return merged.slice(0, 3);
+    // Return primary face first, followed by any confirmed second/third person
+    return [primaryBox, ...confirmedPersons].slice(0, 3);
   }
 
   /**
@@ -1186,7 +1414,7 @@ export class VisionEngine {
     const visited = new Uint8Array(gw * gh);
     const clusters: Array<{ minX: number; maxX: number; minY: number; maxY: number; score: number }> = [];
 
-    const threshold = 6;
+    const threshold = 4; // sensitive enough to detect all face scales
 
     for (let gy = 0; gy < gh; gy++) {
       for (let gx = 0; gx < gw; gx++) {
@@ -1197,6 +1425,7 @@ export class VisionEngine {
           let minY = gy;
           let maxY = gy;
           let clusterScore = 0;
+          let blockCount = 0;
 
           const queue: Array<[number, number]> = [[gx, gy]];
           visited[idx] = 1;
@@ -1208,6 +1437,7 @@ export class VisionEngine {
             minY = Math.min(minY, cy);
             maxY = Math.max(maxY, cy);
             clusterScore += grid[cy * gw + cx];
+            blockCount++;
 
             const neighbors: Array<[number, number]> = [
               [cx + 1, cy],
@@ -1231,7 +1461,8 @@ export class VisionEngine {
           const clusterH = (maxY - minY + 1);
           const aspectRatio = clusterW / clusterH;
 
-          if (clusterScore >= 40 && clusterW >= 3 && clusterH >= 3 && aspectRatio >= 0.4 && aspectRatio <= 2.2) {
+          // Require substantive connected cluster (at least 4 blocks, score >= 35, aspect ratio 0.38..2.3)
+          if (clusterScore >= 35 && blockCount >= 4 && clusterW >= 2 && clusterH >= 2 && aspectRatio >= 0.38 && aspectRatio <= 2.3) {
             clusters.push({ minX, maxX, minY, maxY, score: clusterScore });
           }
         }
@@ -1296,6 +1527,35 @@ export class VisionEngine {
     };
   }
 
+  private buildDiagnostics(
+    cameraConnected: boolean,
+    isVideoTrackLive: boolean,
+    videoWidth: number,
+    videoHeight: number,
+    isPitchBlack: boolean,
+    effectiveFaceCount: number,
+    effectivePersonCount: number
+  ) {
+    const cameraStatusText: 'LIVE' | 'DISCONNECTED' | 'INACTIVE' =
+      cameraConnected && isVideoTrackLive ? 'LIVE' : (!cameraConnected ? 'DISCONNECTED' : 'INACTIVE');
+    const frameStatusText: 'VALID' | 'INVALID' | 'BLACK_SCREEN' =
+      isPitchBlack ? 'BLACK_SCREEN' : (videoWidth > 0 && isVideoTrackLive ? 'VALID' : 'INVALID');
+    const videoResolution = videoWidth > 0 && videoHeight > 0 ? `${videoWidth} × ${videoHeight}` : '1280 × 720';
+
+    return {
+      cameraStatusText,
+      videoResolution,
+      frameStatusText,
+      facesDetected: effectiveFaceCount,
+      personsDetected: effectivePersonCount,
+      faceConfidence: this.averageFaceConfidence,
+      faceStable: effectiveFaceCount === 1 && this.sustainedFaceMissingTimeMs === 0,
+      faceLostDurationMs: Math.round(this.sustainedFaceMissingTimeMs),
+      multiplePerson: effectivePersonCount > 1,
+      proctoringState: this.currentState
+    };
+  }
+
   private getDebugInfo() {
     return {
       baselineEAR: Math.round(this.baselineEAR * 1000) / 1000,
@@ -1309,7 +1569,24 @@ export class VisionEngine {
       eyeState: this.eyeState,
       rawCount: this.rawDetectionsCount,
       uniqueCount: this.uniqueFacesCount,
-      trackedCount: this.trackedFacesCount
+      trackedCount: this.trackedFacesCount,
+      personCount: this.uniqueFacesCount
+    };
+  }
+
+  /**
+   * Get safe diagnostic telemetry for Proctoring Inspector without sensitive data
+   */
+  public getSafeDiagnostics() {
+    return {
+      isRunning: this.isRunning,
+      currentState: this.currentState,
+      frameCount: this.frameCount,
+      currentFps: this.currentFps,
+      trackedFacesCount: this.trackedFacesCount,
+      eyeState: this.eyeState,
+      lastBlinkTimestamp: this.lastBlinkTimestamp,
+      lastFrameTimestamp: Date.now()
     };
   }
 
